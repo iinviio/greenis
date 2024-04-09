@@ -1,0 +1,1 @@
+Use the makefile in /src folder to compile the program.
