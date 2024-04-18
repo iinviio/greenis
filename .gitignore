@@ -1,3 +1,4 @@
 extras/
 extras/*
 src/greenis
+src/*.o

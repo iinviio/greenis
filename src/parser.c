@@ -1,7 +1,8 @@
-#include<stdio.h>
-#include<stdlib.h>
-#include<stdbool.h>
-#include<string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <string.h>
+#include <ctype.h>
 #include "greenis.h"
 
 /*the purpose of this file is to contain all the functions needed to parse the redis client request
@@ -29,7 +30,8 @@ enum symbols {
 0 : success
 -1 : error
 1 : get returned NULL
-2 : op returned empty string (SET op completed, +OKCRLF response)*/
+2 : op returned empty string (SET op completed, +OKCRLF response)
+3 : get returned a valid key*/
 int parse(char* str, char** response){/*parse str according to RESP2 protocol.*/
 
     /*If str contains SET or GET execute the command*/
@@ -48,9 +50,6 @@ int parse(char* str, char** response){/*parse str according to RESP2 protocol.*/
         switch(*str){
 
             case SIMPLE_STRING: /*composed by 5 pieces. " +<string>CRLF " . <string> must not contain CR or LF*/
-
-                /*print the data*/
-                print_command(str);
 
                 len = respstrlen(str);
                 if(OPERATION_REQUESTED){
@@ -76,8 +75,6 @@ int parse(char* str, char** response){/*parse str according to RESP2 protocol.*/
 
             case SIMPLE_ERROR: /*same as SIMPLE_STRING, but the first character is a '-', not a '+'*/
 
-                print_command(str);
-
                 len = respstrlen(str);
                 
                 str += len;
@@ -101,11 +98,9 @@ int parse(char* str, char** response){/*parse str according to RESP2 protocol.*/
                 }
 
                 putchar(*str++);
-                print_command(str);
 
                 int len = respstrlen(str);
                 if(OPERATION_REQUESTED){
-
 
                     tokens_to_retrieve[ttri] = (char*) malloc( (len + 1) * sizeof(char));
                     strncpy(tokens_to_retrieve[ttri], str, len);
@@ -125,71 +120,69 @@ int parse(char* str, char** response){/*parse str according to RESP2 protocol.*/
                 iterations--;
                 break;
 
-            case BULK_STRING: /*represents a single binary string. RESP2 encodes bulk strings as follows : " $<length>CRLF<data>CRLF ", where length is the string's length. 
-                                ($0CRLFCRLF is the empty string, $-1CRLF is the NULL string)*/
+            case BULK_STRING: /*represents a single binary string. RESP2 encodes bulk strings as follows : " $<length>CRLF<payload>CRLF ", where length is the string's length. 
+                                ($0CRLF is the empty string, $-1CRLF is the NULL string)*/
 
                 /*if the content of the string is SET or GET do something. else just validate the string*/
                 /*parse for set/get. If set check for timer parameter*/
 
                 len = atoi(++str);
-
-                str += 3; /*skip CRLF characters. this way str will point to the payload*/
-                print_command(str);
-
-                char *data = (char*) malloc( (len + 1) * sizeof(char)); 
                 
-                /*payload of str.*/
-                strncpy(data, str, len);
-                data[len] = '\0';
+                char* payload = NULL;
+                
+                str += respstrlen(str);/*skip <len>*/
+
+                if(*str != CR || *(str + 1) != LF){ puts("BULK_STRING ERR1"); return -1;}/*skip CRLF*/
+                str += 2;
+
+                if(len >= 0){
+
+                    /*since i cannot declare payload as a normal char array i have to use malloc*/
+                    payload = (char*) malloc((len + 1) * sizeof(char));
+                    
+                    /*<payload> of str*/
+                    strncpy(payload, str, len);
+                    payload[len] = '\0';
+                }
 
                 /*extract the data from str*/
                 if(OPERATION_REQUESTED){
 
                     /*special case : NULL string ($-1CRLF)*/
                     if(len == -1){
-
+                        
                         tokens_to_retrieve[ttri] = NULL;
                         ttri++;
 
-                        free(data);
                         iterations--;
+                        free(payload);
                         break;
                     }
 
-                    tokens_to_retrieve[ttri] = data;
-
-                    /*this if statement cover the special case : EMPTY string ($0CRLF)*/
-                    if(len > 0){strncpy(tokens_to_retrieve[ttri], data, len);}
-
-                    *(tokens_to_retrieve[ttri] + len) = '\0';/*in case of len == 0 the terminating character will still be put in token_to_retrieve*/
+                    tokens_to_retrieve[ttri] = payload;
                     ttri++;
                 }
 
-                str += len;
-                if(*str != CR || *(str + 1) != LF){/*after a CR a LF is expected.*/
+                if(len == 3 && strncmp(payload, "SET", len) == 0){
 
-                    puts("BULK_STRING ERR1");
-                    return -1;
-                }
-                str += 2;
-
-                if(len == 3 && strncmp(data, "SET", len) == 0){
-
-                    if(OPERATION_REQUESTED){puts("BULK_STRING ERR2"); return -1;}
+                    if(OPERATION_REQUESTED){puts("BULK_STRING ERR1"); return -1;}
                     
-                    puts("\nSET REQUESTED");
                     OPERATION_REQUESTED = true;
                     op.wop = SET;
                 }
 
-                if(len == 3 && strncmp(data, "GET", len) == 0){
+                if(len == 3 && strncmp(payload, "GET", len) == 0){
 
-                    if(OPERATION_REQUESTED){puts("BULK_STRING ERR3"); return -1;}
+                    if(OPERATION_REQUESTED){puts("BULK_STRING ERR2"); return -1;}
 
-                    puts("\nGET REQUESTED");
                     OPERATION_REQUESTED = true;
                     op.wop = GET;
                 }
+
+                str += respstrlen(str);/*go to the last CRLF*/
+
+                if(*str != CR || *(str + 1) != LF){ puts("BULK_STRING ERR1"); return -1;}/*skip CRLF*/
+                str += 2;
 
                 iterations--;
                 break;
@@ -226,6 +219,8 @@ int parse(char* str, char** response){/*parse str according to RESP2 protocol.*/
     }
     
     /*fills the field of op*/
+    int return_code = 0; /*return code. This will contains the result of the performed operation*/
+    
     if(OPERATION_REQUESTED){
 
         op.ops.set_op.key = tokens_to_retrieve[0];/*get only need the key*/
@@ -238,16 +233,20 @@ int parse(char* str, char** response){/*parse str according to RESP2 protocol.*/
         }
 
         *response = perform_op(op);
-        if(*response == NULL){/*get returned NULL*/
+        if(*response == NULL){/*operation returned NULL*/
 
-            return 1;
+            if(op.wop == SET){return_code = -1;}/*an error occured on SET operation*/
+            else{return_code = 1;}/*get returned NULL*/
         }
-        else if(strcmp(*response, "") == 0){/*SET performed*/
+        else if(strcmp(*response, "") == 0){/*SET performed and returned successfully*/
 
-            return 2;
+            return_code = 2;
+        }
+        else{
+
+            return_code = 3;/*return whatever get returned*/
         }
     }
-    
 
     /*free the memory and return*/
     for(int i = 0; i < 4; i++){
@@ -257,13 +256,16 @@ int parse(char* str, char** response){/*parse str according to RESP2 protocol.*/
             free(tokens_to_retrieve[i]);
         }
     }
-    return 0;
+
+    return return_code;
 }
 
 /*returns the amount of bytes of the payload. uses \r\l as terminating character instead of '\0'. 
 If \r\l is missing the string will end with the classic terminating character.
 \r\l characters are NOT considered in the final length*/
 int respstrlen(char* s){
+
+    if(!s){return -1;}
 
     int len = 0;
     while(*s){
@@ -278,13 +280,4 @@ int respstrlen(char* s){
     }
 
     return len;
-}
-
-void print_command(char* str){/*prints the command received by the server*/
-
-    while(*str){
-
-        if(*str == CR && *(str + 1) == LF){str += 2; break;}
-        putchar(*str++);
-    }
 }

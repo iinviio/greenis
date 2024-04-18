@@ -17,33 +17,16 @@
 
 /*default server responses*/
 #define OK_RESP "+OK\r\n"
-#define OK_RESP_LEN 6 /*number of character of OK_RESP*/
+#define OK_RESP_LEN 5 /*number of character of OK_RESP*/
 #define ERR_RESP "-ERR\r\n" 
-#define ERR_RESP_LEN 7 /*number of character of ERR_RESP*/
+#define ERR_RESP_LEN 6 /*number of character of ERR_RESP*/
 #define NULL_VALUE "$-1\r\n"
-#define NULL_VALUE_LEN 6
+#define NULL_VALUE_LEN 5
+
 
 /*
-    REQUIREMENTS
-
-In questo compito vogliamo creare un Redis minimale con la sola capacità di set e get di chiavi, compatibile con il protocollo Redis.
-Redis accetta connessioni TCP e riceve pacchetti dati fatti da righe terminate con \r\n.
-I dettagli del protocollo che ci interessano possono essere visti qui: https://redis.io/docs/reference/protocol-spec
-
-Utilizzare il programma python e le risorse presenti qui: 
-https://github.com/SENSES-Lab-Sapienza/Lab_Reti/tree/aa_2023_24/Resources/greenis
-
-Per creare un mini Redis server (che chiameremo Greenis) che permetta di effettuare set/get di chiavi con e senza tempo di scadenza.
-
-Il server deve permettere l'esecuzione senza errori dello script python "client.py"
-*/
-
-/*
-    +, $, * sono i simboli fondamentali ($-1\r\n è il null)
-    aggiungo il '-' per inviare errore?
-    ci sono dei ghirigori da sistemare all'avvio della connessione, poi si comincia con i get e set
-
-
+    IMPORTANT NOTE : RESP2 PROTOCOL EXPECT \r\n AS TERMINATING CHARACTER/SEPARATOR. THE ACTUAL TERMINATING CHARACTER \0
+    IS NEVER EXPECTED, AND WILL MAKE THE CLIENT CRASH!!!
 */
 
 
@@ -77,6 +60,13 @@ void open_socket(){/*creates a socket*/
     if(server.sock_fd == -1){/*error management*/
 
         exit_with_error("socket error. ");
+    }
+
+    /*socket options*/
+    const int enable_reuse_addr = 1;
+    if(setsockopt(server.sock_fd, SOL_SOCKET, SO_REUSEADDR, &enable_reuse_addr, sizeof(enable_reuse_addr)) == -1){
+
+        exit_with_error("setsockopt error. ");
     }
 
     /*fill addr with the client informations (port, ip, ecc)*/
@@ -181,35 +171,64 @@ int main (){
         
         while(read(client.sock_fd, buf, MAX_BUF_SIZE) > 0){/*in case of error (-1) or connection closed by the peer (0) break the loop and close the client socket*/
 
+            puts(buf);
+
             /*parse the request*/
-            char* response;
+            char* response = NULL;
             int tmp = parse(buf, &response);
+            
+            printf("SERVER RESPONSE : ");
             if(tmp == 0 || tmp == 2){/*parsed successfully*/
 
-                puts("\nparsed successfully. proceeding.");
+                puts("OK\n");
                 if(write(client.sock_fd, OK_RESP, OK_RESP_LEN) < 0){break;}/*if write returns -1 close the connection*/
             }
             else if(tmp == -1){/*parsing error. invalid command*/
 
-                puts("\nparse error. respond with error code.");
+                puts("ERR\n");
                 if(write(client.sock_fd, ERR_RESP, ERR_RESP_LEN) < 0){break;}/*if write returns -1 close the connection*/
             }
             else if(tmp == 1){
 
-                puts("\nnull get value.");
+                puts("NULL\n");
                 if(write(client.sock_fd, NULL_VALUE, NULL_VALUE_LEN) < 0){break;}/*if write returns -1 close the connection*/
             }
             else{
 
-                puts("\nvalid get value.");
-                if(write(client.sock_fd, response, strlen(response)) < 0){break;}/*if write returns -1 close the connection*/
+                puts(response);
+                puts("");
+
+                int payload_len = strlen(response);/*length of response*/
+
+                /*convert 'payload_len' into string*/
+                char tmp[payload_len]; 
+                sprintf(tmp, "%d", payload_len);
+
+                int len = strlen(tmp) + 5 + payload_len;/*length of the final response*/ 
+                char encoded_response[len];
+
+                int i = 0;
+                strncpy(&encoded_response[i], "$", 1);/*$*/
+                i++;
+
+                strncpy(&encoded_response[i], tmp, strlen(tmp));/*$<len>*/
+                i += strlen(tmp);
+
+                strncpy(&encoded_response[i], "\r\n", 2);/*$<len>CRLF*/
+                i += 2;
+
+                strncpy(&encoded_response[i], response, payload_len);/*$<len>CRLF<payload>*/
+                i += payload_len;
+
+                strncpy(&encoded_response[i], "\r\n", 2);/*$<len>CRLF<payload>CRLF*/
+
+                if(write(client.sock_fd, encoded_response, strlen(encoded_response)) < 0){break;}/*if write returns -1 close the connection*/
             }
             
-            puts(buf);
             clearbuf(buf, MAX_BUF_SIZE);
         }
 
-        puts("client closed the connection");
+        puts("LOG : client closed the connection\n");
         close_connection(client);
         return 0;
     }
